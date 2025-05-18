@@ -522,7 +522,7 @@ async function loadPdfFromDrive(fileId, showLoading = true) {
             Swal.fire({
                 icon: 'error',
                 title: '載入失敗',
-                text: '無法載入 PDF 檔案，請檢查檔案是否正確。',
+                text: '無法載入 PDF 檔案，請檢查檔案是否正確或未開放瀏覽。',
             });
         });
     } catch (error) {
@@ -531,7 +531,7 @@ async function loadPdfFromDrive(fileId, showLoading = true) {
             Swal.fire({
                 icon: 'error',
                 title: '載入失敗',
-                text: '無法載入 PDF 檔案，請檢查檔案 ID 是否正確。',
+                text: '無法載入 PDF 檔案，請檢查檔案 ID 是否正確或未開放瀏覽。',
             });
         }
     }
@@ -663,7 +663,7 @@ pdfFileInput.addEventListener('change', async (event) => {
                     renderPage(currentPage);
                 }).catch(error => {
                     console.error('PDF 檔案載入失敗：', error);
-                    alert('無法載入 PDF 檔案，請檢查檔案是否正確。');
+                    alert('無法載入 PDF 檔案，請檢查檔案是否正確或未開放瀏覽。');
                 });
             };
             fileReader.onerror = function() {
@@ -729,7 +729,7 @@ async function loadPdfFromDrive(fileId, showLoading = true) {
             Swal.fire({
                 icon: 'error',
                 title: '載入失敗',
-                text: '無法載入 PDF 檔案，請檢查檔案是否正確。',
+                text: '無法載入 PDF 檔案，請檢查檔案是否正確或未開放瀏覽。',
             });
         });
     } catch (error) {
@@ -738,7 +738,7 @@ async function loadPdfFromDrive(fileId, showLoading = true) {
             Swal.fire({
                 icon: 'error',
                 title: '載入失敗',
-                text: '無法載入 PDF 檔案，請檢查檔案 ID 是否正確。',
+                text: '無法載入 PDF 檔案，請檢查檔案 ID 是否正確或未開放瀏覽。',
             });
         }
     }
