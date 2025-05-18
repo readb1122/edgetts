@@ -574,7 +574,7 @@ window.addEventListener('load', async () => {
                             renderPage(currentPage);
                         }).catch(error => {
                             console.error('PDF 檔案載入失敗：', error);
-                            alert('無法載入 PDF 檔案，請檢查檔案是否正確。');
+                            alert('無法載入 PDF 檔案，請檢查檔案是否正確或未開放瀏覽。');
                         });
                     };
                     fileReader.onerror = function() {
@@ -605,7 +605,7 @@ window.addEventListener('load', async () => {
                                 renderPage(currentPage);
                             }).catch(error => {
                                 console.error('PDF 檔案載入失敗：', error);
-                                alert('無法載入 PDF 檔案，請檢查檔案是否正確。');
+                                alert('無法載入 PDF 檔案，請檢查檔案是否正確或未開放瀏覽。');
                             });
                         };
                         fileReader.onerror = function() {
