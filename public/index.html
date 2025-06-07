@@ -1525,7 +1525,13 @@ document.addEventListener('mouseup', () => {
             }
             
             const cleanedText = highlightedText.join('').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
-            sendTextToTTS(cleanedText);
+            sendTextToTTS(cleanedText, () => {
+                // 朗讀完成後的回調
+                document.getElementById('sendButton').textContent = "朗讀選取文字";
+                document.getElementById('sendButton').classList.remove('button-danger');
+                document.getElementById('sendButton').classList.add('button-light');
+                isReading = false;
+            });
         }
 
         function clearHighlights() {

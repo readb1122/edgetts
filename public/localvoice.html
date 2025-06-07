@@ -296,7 +296,7 @@ input[type=range]::-moz-range-thumb {
 
 // 頁數同步相關變量
 let pageSyncTimeout = null;
-const PAGE_SYNC_DELAY = 300; // 防抖延遲(毫秒)
+const PAGE_SYNC_DELAY = 300; // 防遲延(毫秒)
 
 // 修改 notifyPageChange 函數
 function notifyPageChange(page) {
@@ -1610,6 +1610,24 @@ document.addEventListener('mouseup', () => {
         }
     }
 }
+        document.getElementById('sendButton').addEventListener('click', function() {
+    if (isReading) {
+        // 取消朗讀
+        window.speechSynthesis.cancel();
+        this.textContent = "朗讀選取文字";
+        this.classList.remove('button-danger');
+        this.classList.add('button-light');
+        isReading = false;
+    } else {
+        // 開始朗讀
+        sendHighlightedText();
+        this.textContent = "取消朗讀";
+        this.classList.remove('button-light');
+        this.classList.add('button-danger');
+        isReading = true;
+    }
+});
+
         function sendHighlightedText() {
             const highlightedText = [];
             const textLayerDivs = document.getElementById('viewerContainer').getElementsByClassName('textLayer');
@@ -1626,10 +1644,15 @@ document.addEventListener('mouseup', () => {
             }
             
             const cleanedText = highlightedText.join('').trim().replace(/[\r\n]+/g, '').replace(/\s+/g, ' ').trim();
-            sendTextToTTS(cleanedText);
+            sendTextToTTS(cleanedText, () => {
+                // 朗讀完成後的回調
+                document.getElementById('sendButton').textContent = "朗讀選取文字";
+                document.getElementById('sendButton').classList.remove('button-danger');
+                document.getElementById('sendButton').classList.add('button-light');
+                isReading = false;
+            });
         }
 
-        document.getElementById('sendButton').addEventListener('click', sendHighlightedText);
         document.getElementById('clearButton').addEventListener('click', clearHighlights);
         document.getElementById('touchSelectCheckbox').addEventListener('change', function() {
             const isChecked = this.checked;
