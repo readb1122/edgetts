@@ -283,6 +283,10 @@ input[type=range]::-moz-range-thumb {
   <button id="clearButton" class="button button-light" style="writing-mode: vertical-rl; text-orientation: upright;position: fixed; bottom: 5px;left: 0%; z-index: 2000;color:black;font-size:20px;font-weight:bold;color: rgb(134, 101, 224);font-size: 20px;text-shadow: rgb(204, 204, 204) 0px 1px 0px, rgb(201, 201, 201) 0px 2px 0px;display:none;">清除選取文字</button>
   <label style="writing-mode: vertical-rl; text-orientation: upright;position: fixed; top: 300px;left: 2px; z-index: 1000;color:black;font-size:16px;font-weight:bold;color: rgb(134, 101, 224);font-size: 20px;text-shadow: rgb(204, 204, 204) 0px 1px 0px, rgb(201, 201, 201) 0px 2px 0px;">
         <input type="checkbox" id="touchSelectCheckbox" style="writing-mode: vertical-rl; text-orientation: upright; width: 30px; height: 30px; position: fixed;left: 1px;top: 260px;">觸控選取</label>
+<!-- 新增：手動清除快取按鈕 -->
+    <button id="clearCacheButton" class="button button-danger" style="writing-mode: vertical-rl; text-orientation: upright;position: fixed; left: 0px; top: 450px; z-index: 1100; font-size: 16px;">清除快取</button> 
+
+	
   <div style=" position: fixed;  top: 30px; right:15px; z-index: 1900;">  
 <select id="voiceSelect"></select>
 </div>    
@@ -844,7 +848,20 @@ const fileId = urlParams.get('file');
 if (fileId) {
     loadPdfFromDrive(fileId);
 }
-
+// 新增：手動清除快取按鈕功能
+const clearCacheButton = document.getElementById('clearCacheButton');
+if (clearCacheButton) {
+    clearCacheButton.addEventListener('click', async () => {
+        await clearIndexedDB(true);
+        Swal.fire({
+            icon: 'success',
+            title: '已清除PDF快取',
+            text: 'PDF 快取已清除，請重新載入檔案。',
+            timer: 1500,
+            showConfirmButton: false
+        });
+    });
+}
 </script>
  <script>
        window.onload = function () {
