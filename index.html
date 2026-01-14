@@ -1709,6 +1709,12 @@ async function geminiImageDescribe(base64Image) {
 }
 
 async function readTextInsideFrame() {
+    // 如果正在進行圖片辨識，直接返回，防止重複執行
+    if (isImageRecognizing) {
+        console.log('圖片辨識正在進行中，忽略重複請求');
+        return;
+    }
+    
     window.speechSynthesis.cancel();
     const frameRect = frame.getBoundingClientRect();
     const viewerContainer = document.getElementById('viewerContainer');
@@ -1760,13 +1766,12 @@ async function readTextInsideFrame() {
     }
     // 沒有 PDF 文字層，才送圖片給 AI
     if (hasImageContent) {
-        // 在 iOS 上，需要在用戶交互的同步上下文中立即獲取音頻播放權限
-        // 通過播放"辨識中請稍候"來獲取權限，同時給用戶提示
-        let permissionObtained = false;
+        // 設置標記，防止重複執行
+        isImageRecognizing = true;
         
-        // 立即在用戶交互上下文中播放"辨識中請稍候"以獲取權限
+        // 在 iOS 上，需要在用戶交互的同步上下文中立即獲取音頻播放權限
+        // 通過播放"圖片辨識中，請稍候。"來獲取權限，同時給用戶提示
         sendTextToTTS('圖片辨識中，請稍候。', () => {
-            permissionObtained = true;
             console.log('播放權限已獲取，開始圖片辨識');
         });
         
@@ -1786,7 +1791,7 @@ async function readTextInsideFrame() {
             Swal.close();
             //console.log('Gemini 原始回傳:', aiDescription);
             if (aiDescription && aiDescription.length > 0) {
-                // 等待"辨識中請稍候"播放完成（或至少等待一小段時間確保權限已獲取）
+                // 等待"圖片辨識中，請稍候。"播放完成（或至少等待一小段時間確保權限已獲取）
                 // 如果還在播放，停止它
                 const audioPlayer = document.getElementById('audioPlayer');
                 if (audioPlayer && !audioPlayer.paused) {
@@ -1798,6 +1803,8 @@ async function readTextInsideFrame() {
                 // 此時已經獲取了播放權限，可以自動播放
                 sendTextToTTS(aiDescription, () => {
                     console.log('圖片辨識文字朗讀完成');
+                    // 辨識完成，重置標記
+                    isImageRecognizing = false;
                 });
             } else {
                 console.error('Gemini 回傳的內容為空');
@@ -1806,6 +1813,8 @@ async function readTextInsideFrame() {
                     title: '辨識結果為空',
                     text: 'AI 無法辨識圖片內容'
                 });
+                // 辨識失敗，重置標記
+                isImageRecognizing = false;
             }
         } catch (error) {
             console.error('Gemini 辨識失敗:', error);
@@ -1814,6 +1823,8 @@ async function readTextInsideFrame() {
                 title: '辨識失敗',
                 text: 'AI 辨識過程中發生錯誤。'
             });
+            // 辨識失敗，重置標記
+            isImageRecognizing = false;
         }
         return;
     }
@@ -1855,6 +1866,7 @@ function cropCanvas(sourceCanvas, cropRect) {
   return canvas;
 }
   let lastTouchElement = null;
+  let isImageRecognizing = false; // 防止圖片辨識重複執行
 
  function wrapTextInFraTags() {
     const markedContentSpans = document.querySelectorAll('span[role="presentation"]');

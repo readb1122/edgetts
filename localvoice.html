@@ -1780,13 +1780,16 @@ const cleanedText = textInsideFrame.trim().replace(/[\r\n]+/g, ' ').replace(/\s{
 
     // 沒有 PDF 文字層，才送圖片給 AI
     if (hasImageContent) {
+        // 若前一次圖片辨識尚未結束，避免重複觸發提示語音與辨識流程
+        if (isImageRecognizing) {
+            console.log('圖片辨識仍在進行中，本次點擊已忽略');
+            return;
+        }
+        isImageRecognizing = true;
+
         // 在 iOS 上，需要在用戶交互的同步上下文中立即獲取音頻播放權限
-        // 通過播放"圖片辨識中，請稍候。"來獲取權限，同時給用戶提示
-        let permissionObtained = false;
-        
-        // 立即在用戶交互上下文中播放"圖片辨識中，請稍候。"以獲取權限
+        // 先播放「圖片辨識中，請稍候。」來取得播放權限，同時給用戶提示
         sendTextToTTS('圖片辨識中，請稍候。', () => {
-            permissionObtained = true;
             console.log('播放權限已獲取，開始圖片辨識');
         });
         
@@ -1833,6 +1836,9 @@ const cleanedText = textInsideFrame.trim().replace(/[\r\n]+/g, ' ').replace(/\s{
                 title: '辨識失敗',
                 text: 'AI 辨識過程中發生錯誤。'
             });
+        } finally {
+            // 結束後重置旗標，允許下一次辨識
+            isImageRecognizing = false;
         }
         return;
     }
@@ -1926,6 +1932,8 @@ function cropCanvas(sourceCanvas, cropRect) {
   return canvas;
 }
   let lastTouchElement = null;
+  // 圖片辨識是否進行中的旗標，用來避免「圖片辨識中，請稍候」被重複觸發
+  let isImageRecognizing = false;
 
  function wrapTextInFraTags() {
     const markedContentSpans = document.querySelectorAll('span[role="presentation"]');
