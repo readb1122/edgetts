@@ -1876,11 +1876,13 @@ window.sendTextToTTS = sendTextToTTS;
                     for (let span of spans) {
                         // 檢查是否在標記區域內，如果在且標記有替換文字，使用替換文字
                         const textToAdd = getTextWithMarkReplacement(span, textLayer);
-                        fullText += textToAdd + ' ';
+                        // 直接連接，不加空格，保持原始文本格式
+                        fullText += textToAdd;
                     }
                 }
 
-                const cleanedText = fullText.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+                // 清理文本：移除換行符，將多個連續空格合併為單個空格，但保留原本就存在的空格（如英文單詞之間）
+                const cleanedText = fullText.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
                 sentences = cleanedText.split(/(?<=[。！？])/); // 根據標點符號分句
                 currentSentenceIndex = 0;
                 isReading = true;
@@ -1896,8 +1898,43 @@ window.sendTextToTTS = sendTextToTTS;
 
 function cancelReading() {
   isReading = false;
-  audioPlayer.pause();
-  audioPlayer.currentTime = 0;
+  
+  // 停止本機語音
+  try {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+  } catch (e) {
+    console.warn('取消本機語音時發生例外：', e);
+  }
+  
+  // 停止並重設自訂音頻播放器
+  const audioPlayerEl = document.getElementById('audioPlayer');
+  if (audioPlayerEl) {
+    audioPlayerEl.pause();
+    audioPlayerEl.currentTime = 0;
+    
+    // 清除所有事件監聽器，防止回調繼續執行
+    audioPlayerEl.oncanplay = null;
+    audioPlayerEl.onended = null;
+    audioPlayerEl.onerror = null;
+    audioPlayerEl.onloadstart = null;
+    audioPlayerEl.onloadeddata = null;
+    audioPlayerEl.onprogress = null;
+    audioPlayerEl.onabort = null;
+    audioPlayerEl.onstalled = null;
+    audioPlayerEl.onsuspend = null;
+    
+    // 清空來源並強制重新載入，以切斷舊音檔
+    audioPlayerEl.removeAttribute('src');
+    try {
+      audioPlayerEl.load();
+    } catch (e) {
+      console.warn('重載 audioPlayer 時發生例外：', e);
+    }
+  }
+  
+  // 更新按鈕狀態
   selectAllTextButton.textContent = "整頁朗讀";
   selectAllTextButton.classList.remove('button-danger');
   selectAllTextButton.classList.add('button-light');
@@ -1907,9 +1944,10 @@ function cancelReading() {
   textLayerDivs.forEach(span => {
     span.style.backgroundColor = ''; // 清除標示
   });
-
-  // 清除事件監聽器
-  audioPlayer.onended = null;
+  
+  // 重置句子索引，防止繼續朗讀
+  currentSentenceIndex = 0;
+  sentences = [];
 }
 
 function startReading() {
@@ -1921,12 +1959,22 @@ function startReading() {
 }
 
 function readNextSentence() {
-    if (isReading && currentSentenceIndex < sentences.length) {
+    // 檢查是否仍在朗讀狀態，如果已取消則不繼續
+    if (!isReading) {
+        return;
+    }
+    
+    if (currentSentenceIndex < sentences.length) {
         const sentence = sentences[currentSentenceIndex];
         highlightCurrentSentence(sentence);
         sendTextToTTS(sentence, function() {
+            // 再次檢查是否仍在朗讀狀態，防止在播放過程中取消
+            if (!isReading) {
+                return;
+            }
+            
             currentSentenceIndex++;
-            if (currentSentenceIndex < sentences.length) {
+            if (currentSentenceIndex < sentences.length && isReading) {
                 readNextSentence();
             } else {
                 isReading = false;
