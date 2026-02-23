@@ -1519,6 +1519,29 @@ if (clearCacheButton) {
   let audioPlayer = null;
   let browserVoices = [];
 
+  // 偵測是否為 iOS（含 iPadOS），用於 speechSynthesis 相容性處理
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  /**
+   * iOS 18 / Safari：語音必須在「使用者手勢」內解鎖後才能發音。
+   * 須在按鈕點擊等事件的「同步」程式碼開頭呼叫，不可放在 setTimeout/async 之後。
+   */
+  function unlockLocalSpeechForIOS() {
+      if (!('speechSynthesis' in window)) return;
+      try {
+          window.speechSynthesis.cancel();
+          if (typeof window.speechSynthesis.resume === 'function') {
+              window.speechSynthesis.resume();
+          }
+          var u = new SpeechSynthesisUtterance('');
+          u.volume = 0;
+          window.speechSynthesis.speak(u);
+      } catch (e) {
+          console.warn('unlockLocalSpeechForIOS:', e);
+      }
+  }
+
   // 初始化瀏覽器語音列表
   function initBrowserVoices() {
       if (!('speechSynthesis' in window)) {
@@ -1559,12 +1582,25 @@ if (clearCacheButton) {
       const isChinese = lowerLang === 'zh' || lowerLang.startsWith('zh');
       
       if (isChinese) {
-          // 優先：繁體中文（zh-TW）女聲
+          // 最優先：美佳（Mei-Jia）— 正統中文發音
+          for (const langCode of chineseLangCodes) {
+              const meiJia = browserVoices.find(v => {
+                  const vLang = (v.lang || '').toLowerCase();
+                  const isLangMatch = vLang === langCode || vLang.startsWith(langCode);
+                  const isMeiJia = v.name && /美佳|Mei-?Jia|MeiJia/i.test(v.name);
+                  return isLangMatch && isMeiJia;
+              });
+              if (meiJia) {
+                  console.log('找到中文語音（美佳）:', meiJia.name, meiJia.lang);
+                  return meiJia;
+              }
+          }
+          // 次優先：其他繁體中文女聲（Yuna、Ting-Ting 等）
           for (const langCode of chineseLangCodes) {
               const zhFemale = browserVoices.find(v => {
                   const vLang = (v.lang || '').toLowerCase();
                   const isLangMatch = vLang === langCode || vLang.startsWith(langCode);
-                  const isFemale = v.name && /female|女|woman|girl|Mei-Jia|Yuna|Ting-Ting|Sin-Ji/i.test(v.name);
+                  const isFemale = v.name && /female|女|woman|girl|Yuna|Ting-Ting|Sin-Ji/i.test(v.name);
                   return isLangMatch && isFemale;
               });
               if (zhFemale) {
@@ -1573,7 +1609,7 @@ if (clearCacheButton) {
               }
           }
           
-          // 次優先：任何中文語音（優先 zh-TW）
+          // 再次：任何中文語音（優先 zh-TW）
           for (const langCode of chineseLangCodes) {
               const zhVoice = browserVoices.find(v => {
                   const vLang = (v.lang || '').toLowerCase();
@@ -1624,16 +1660,23 @@ if (clearCacheButton) {
           if (!voice) {
               console.warn('找不到對應的本機語音，無法朗讀');
               // 如果是中文且找不到語音，再試一次（iPad 可能需要時間載入）
-              if (langPrefix === 'zh') {
+              if (langPrefix === 'zh' || langPrefix === 'en') {
+                  var delay = (typeof isIOS !== 'undefined' && isIOS) ? 500 : 200;
                   setTimeout(() => {
                       const retryVoice = findLocalVoice(langPrefix);
                       if (retryVoice) {
                           doSpeak(retryVoice);
+                      } else if (typeof isIOS !== 'undefined' && isIOS) {
+                          setTimeout(() => {
+                              const retry2 = findLocalVoice(langPrefix);
+                              if (retry2) doSpeak(retry2);
+                              else { console.error('重試後仍找不到本機語音'); if (callback) callback(); }
+                          }, 800);
                       } else {
-                          console.error('重試後仍找不到中文語音');
+                          console.error('重試後仍找不到本機語音');
                           if (callback) callback();
                       }
-                  }, 200);
+                  }, delay);
                   return;
               }
               if (callback) callback();
@@ -1678,6 +1721,9 @@ if (clearCacheButton) {
           };
 
           try {
+              if (typeof window.speechSynthesis.resume === 'function') {
+                  window.speechSynthesis.resume();
+              }
               window.speechSynthesis.speak(utterance);
           } catch (e) {
               console.error('speak() 呼叫失敗：', e);
@@ -1957,6 +2003,7 @@ window.sendTextToTTS = sendTextToTTS;
         let isReading = false;
 
         selectAllTextButton.addEventListener('click', function() {
+            if (!isReading) unlockLocalSpeechForIOS();
             clearHighlights();
             if (isReading) {
                 // 取消朗讀
@@ -2400,6 +2447,7 @@ async function geminiImageDescribe(base64Image) {
 }
 
 async function readTextInsideFrame() {
+    unlockLocalSpeechForIOS();
     // 如果正在進行圖片辨識，直接返回，防止重複執行
     if (isImageRecognizing) {
         console.log('圖片辨識正在進行中，忽略重複請求');
@@ -2748,6 +2796,7 @@ document.addEventListener('mouseup', () => {
     }
 }
         function sendHighlightedText() {
+            unlockLocalSpeechForIOS();
             // 清除標記替換緩存
             clearMarkReplacementCache();
 
@@ -4979,12 +5028,13 @@ function finishMark(e) {
             replacementText: '' // 替換文字，用於錯誤發音修正
         });
         
-        // 保存標記ID和頁碼到變量中，避免閉包問題
+        // 保存標記ID和頁碼、此區塊 DOM，避免閉包問題（多區塊時每個區塊各自綁定）
         const markId = currentMark.id;
         const markPageNum = currentMark.pageNum;
+        const markBlockElement = currentMark.element;
         
         // 添加點擊事件（點擊區塊時朗讀）
-        currentMark.element.addEventListener('click', (e) => {
+        markBlockElement.addEventListener('click', (e) => {
             // 如果點擊的是刪除按鈕、編輯按鈕、調整大小控制點或其子元素，不觸發朗讀
             if (e.target.classList.contains('mark-delete') || 
                 e.target.closest('.mark-delete') ||
@@ -4999,7 +5049,7 @@ function finishMark(e) {
                 return;
             }
             // 檢查是否剛剛進行了拖拽或調整大小（避免誤觸發朗讀）
-            const wasDragging = currentMark.element.classList.contains('dragging');
+            const wasDragging = markBlockElement.classList.contains('dragging');
             if (wasDragging) {
                 // 如果剛剛拖拽過，不觸發朗讀
                 return;
@@ -5025,7 +5075,7 @@ function finishMark(e) {
         toolbar.className = 'mark-toolbar';
         
         // 如果標記框寬度不足（小於 80px），工具欄顯示在外部
-        const markWidth = parseFloat(currentMark.element.style.width) || currentMark.width;
+        const markWidth = parseFloat(markBlockElement.style.width) || currentMark.width;
         if (markWidth < 80) {
             toolbar.classList.add('small-box');
         }
@@ -5038,7 +5088,7 @@ function finishMark(e) {
         lockBtn.title = isLocked ? '解鎖標記（解鎖後可移動、調整和刪除）' : '鎖定標記（鎖定後不可移動、調整和刪除）';
         if (isLocked) {
             lockBtn.classList.add('locked');
-            currentMark.element.classList.add('locked');
+            markBlockElement.classList.add('locked');
         }
         
         // 使用標記防止重複觸發
@@ -5056,30 +5106,34 @@ function finishMark(e) {
             
             isLockHandling = true;
             
-            // 確保 markData 對象存在
-            if (!markData) {
+            // 每次點擊時從陣列重新取得此區塊的資料（避免閉包或資料同步問題）
+            const currentMarkData = marks[markPageNum].find(m => m.id === markId);
+            if (!currentMarkData) {
                 console.error('找不到標記數據:', markId);
                 isLockHandling = false;
                 return false;
             }
             
             // 切換鎖定狀態
-            markData.locked = !markData.locked;
+            currentMarkData.locked = !currentMarkData.locked;
             
-            console.log('切換鎖定狀態，標記ID:', markId, '新狀態:', markData.locked);
+            console.log('切換鎖定狀態，標記ID:', markId, '新狀態:', currentMarkData.locked);
             
-            // 立即更新標記框狀態
-            if (markData.locked) {
-                currentMark.element.classList.add('locked');
+            // 立即更新「此區塊」的標記框與鎖頭圖示（使用綁定的 DOM，不用全域 currentMark）
+            if (currentMarkData.locked) {
+                markBlockElement.classList.add('locked');
                 lockBtn.textContent = '🔒';
                 lockBtn.classList.add('locked');
                 lockBtn.title = '解鎖標記（解鎖後可移動、調整和刪除）';
             } else {
-                currentMark.element.classList.remove('locked');
+                markBlockElement.classList.remove('locked');
                 lockBtn.textContent = '🔓';
                 lockBtn.classList.remove('locked');
                 lockBtn.title = '鎖定標記（鎖定後不可移動、調整和刪除）';
             }
+            // 強制瀏覽器立即重繪，讓鎖頭圖示馬上顯示（避免已上鎖但圖示延遲更新）
+            void lockBtn.offsetHeight;
+            void markBlockElement.offsetHeight;
             
             // 保存到 PDF（異步執行，不阻塞 UI 更新）
             saveMarksToPdf(false).catch(err => {
@@ -5149,7 +5203,7 @@ function finishMark(e) {
         toolbar.appendChild(deleteBtn);
         
         // 將工具欄添加到標記框
-        currentMark.element.appendChild(toolbar);
+        markBlockElement.appendChild(toolbar);
         
         // 在編輯模式下添加調整大小的控制點和拖拽功能（與renderMarks相同）
         if (isMarkingMode) {
@@ -5159,12 +5213,12 @@ function finishMark(e) {
                 const handle = document.createElement('div');
                 handle.className = `resize-handle ${direction}`;
                 handle.dataset.direction = direction;
-                currentMark.element.appendChild(handle);
+                markBlockElement.appendChild(handle);
             });
             
-            // 拖拽移動功能（使用閉包保存每個標記的狀態）
-            const markLayer = document.querySelector(`.mark-layer[data-page-num="${currentMark.pageNum}"]`);
-            const markBlock = currentMark.element;
+            // 拖拽移動功能（使用閉包保存每個標記的狀態，用 markBlockElement 不用 currentMark）
+            const markLayer = document.querySelector(`.mark-layer[data-page-num="${markPageNum}"]`);
+            const markBlock = markBlockElement;
             const markState = {
                 isDragging: false,
                 isResizing: false,
@@ -5214,8 +5268,8 @@ function finishMark(e) {
             // 處理調整大小
             const handleResizeStart = (e, direction) => {
                 // 如果標記已鎖定，不允許調整大小
-                if (currentMark && marks[currentMark.pageNum]) {
-                    const currentMarkData = marks[currentMark.pageNum].find(m => m.id === markId);
+                if (marks[markPageNum]) {
+                    const currentMarkData = marks[markPageNum].find(m => m.id === markId);
                     if (currentMarkData && currentMarkData.locked) {
                         return;
                     }
@@ -5242,8 +5296,8 @@ function finishMark(e) {
             // 處理拖拽開始
             const handleDragStart = (e) => {
                 // 如果標記已鎖定，不允許拖拽
-                if (currentMark && marks[currentMark.pageNum]) {
-                    const currentMarkData = marks[currentMark.pageNum].find(m => m.id === markId);
+                if (marks[markPageNum]) {
+                    const currentMarkData = marks[markPageNum].find(m => m.id === markId);
                     if (currentMarkData && currentMarkData.locked) {
                         return;
                     }
@@ -5363,7 +5417,7 @@ function finishMark(e) {
                 if (markState.isDragging || markState.isResizing) {
                     // 如果移動了位置或調整了大小，更新標記數據
                     if (positionChanged || sizeChanged || markState.hasMoved) {
-                        const updatedMark = marks[currentMark.pageNum].find(m => m.id === markId);
+                        const updatedMark = marks[markPageNum].find(m => m.id === markId);
                         if (updatedMark) {
                             updatedMark.x = finalLeft;
                             updatedMark.y = finalTop;
@@ -5372,7 +5426,7 @@ function finishMark(e) {
                             
                             // 如果調整了大小，重新提取文字
                             if (markState.isResizing && sizeChanged) {
-                                updatedMark.text = extractTextFromMark(updatedMark, currentMark.pageNum);
+                                updatedMark.text = extractTextFromMark(updatedMark, markPageNum);
                                 console.log('標記大小已調整，重新提取文字:', updatedMark.text);
                             }
                             
@@ -5401,11 +5455,12 @@ function finishMark(e) {
                 // 如果沒有移動，觸發語音朗讀（在清理完成後）
                 // 但不在標記模式下觸發，避免錯誤
                 if (shouldRead && !isMarkingMode) {
+                    unlockLocalSpeechForIOS();
                     // 設置標記，避免 click 事件重複觸發
                     markBlock.dataset.justHandledDrag = 'true';
                     // 使用 setTimeout 確保所有清理工作完成後再觸發語音
                     setTimeout(() => {
-                        readMarkBlock(markId, currentMark.pageNum);
+                        readMarkBlock(markId, markPageNum);
                         // 清除標記
                         setTimeout(() => {
                             delete markBlock.dataset.justHandledDrag;
@@ -5430,8 +5485,8 @@ function finishMark(e) {
         
     } else {
         // 標記太小，移除
-        if (currentMark.element) {
-            currentMark.element.remove();
+        if (markBlockElement) {
+            markBlockElement.remove();
         }
     }
     
@@ -5440,6 +5495,7 @@ function finishMark(e) {
 
 // 朗讀標記區塊
 async function readMarkBlock(markId, pageNum) {
+    unlockLocalSpeechForIOS();
     // 每次朗讀新的區塊前，先清除之前的朗讀標示與發音狀態
     try {
         const allFraSpans = document.querySelectorAll('#viewerContainer .textLayer my-fra');
@@ -5928,6 +5984,7 @@ async function editMarkReplacementText(markId, pageNum) {
                     originalTextDisplay.addEventListener('click', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
+                        unlockLocalSpeechForIOS();
                         // 使用首頁選擇的發音方式發音
                         if (displayText && displayText !== '(無文字)') {
                             sendTextToTTS(displayText);
@@ -6337,6 +6394,9 @@ function renderMarks() {
                 lockBtn.classList.remove('locked');
                 lockBtn.title = '鎖定標記（鎖定後不可移動、調整和刪除）';
             }
+            // 強制瀏覽器立即重繪，讓鎖頭圖示馬上顯示（避免已上鎖但圖示延遲更新）
+            void lockBtn.offsetHeight;
+            void markBlock.offsetHeight;
             
             // 保存到 PDF（異步執行，不阻塞 UI 更新）
             saveMarksToPdf(false).catch(err => {
