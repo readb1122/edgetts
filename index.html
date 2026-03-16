@@ -696,21 +696,21 @@ input[type=range]::-moz-range-thumb {
                     </a>
                     並登入你的 Google 帳號。
                 </li>
-                <li>第二步驟：依照下方的教學圖片步驟建立並複製你的 API KEY。</li>
+                <li>第二步驟：依照下方的圖片或影片步驟建立並複製你的 API KEY。</li>
             </ol>
             <div style="text-align: center; margin-bottom: 10px;">
                 <img
                     id="apiKeyHelpImage"
-                    src="./Gemini_APIkey.png"
+                    src="https://flysuper-tool.github.io/apps/Gemini_APIkey.png"
                     alt="Gemini API KEY 取得教學"
                     style="max-width: 100%; border-radius: 6px; border: 1px solid #ddd; cursor: zoom-in;"
                 >
                 <div style="font-size: 12px; color: #666; margin-top: 4px;">（點擊圖片可放大檢視）</div>
             </div>
-				<div style="text-align: center;">
+			<div style="text-align: center;">
 			<iframe width="560" height="315" src="https://www.youtube.com/embed/IHdSYUtlA8M?si=f-Vr7otqVYvDB6a7" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
             </div>
-            <div style="text-align: center;">
+			<div style="text-align: center;">
                 <button id="apiKeyHelpCloseButton" type="button" class="button button-secondary" style="min-width: 100px;">關閉</button>
             </div>
         </div>
@@ -2017,33 +2017,38 @@ window.sendTextToTTS = sendTextToTTS;
                 
                 // 開始朗讀
                 const pdfContainer = document.getElementById('pdfContainer');
-                const textLayers = pdfContainer.getElementsByClassName('textLayer');
-                let fullText = '';
+        prepareSentencesFromCurrentPage();
+        isReading = true;
 
-                for (let textLayer of textLayers) {
-                    const spans = textLayer.getElementsByTagName('my-fra');
-                    for (let span of spans) {
-                        // 檢查是否在標記區域內，如果在且標記有替換文字，使用替換文字
-                        const textToAdd = getTextWithMarkReplacement(span, textLayer);
-                        // 直接連接，不加空格，保持原始文本格式
-                        fullText += textToAdd;
-                    }
-                }
+        // 立即更新按鈕樣式和文本
+        selectAllTextButton.textContent = "取消朗讀";
+        selectAllTextButton.classList.remove('button-light');
+        selectAllTextButton.classList.add('button-danger');
 
-                // 清理文本：移除換行符，將多個連續空格合併為單個空格，但保留原本就存在的空格（如英文單詞之間）
-                const cleanedText = fullText.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
-                sentences = cleanedText.split(/(?<=[。！？])/); // 根據標點符號分句
-                currentSentenceIndex = 0;
-                isReading = true;
-
-                // 立即更新按鈕樣式和文本
-                selectAllTextButton.textContent = "取消朗讀";
-                selectAllTextButton.classList.remove('button-light');
-                selectAllTextButton.classList.add('button-danger');
-
-                startReading(); // 直接開始朗讀
+        startReading(); // 直接開始朗讀
             }
         });
+
+    function prepareSentencesFromCurrentPage() {
+        const pdfContainer = document.getElementById('pdfContainer');
+        const textLayers = pdfContainer.getElementsByClassName('textLayer');
+        let fullText = '';
+
+        for (let textLayer of textLayers) {
+            const spans = textLayer.getElementsByTagName('my-fra');
+            for (let span of spans) {
+                // 檢查是否在標記區域內，如果在且標記有替換文字，使用替換文字
+                const textToAdd = getTextWithMarkReplacement(span, textLayer);
+                // 直接連接，不加空格，保持原始文本格式
+                fullText += textToAdd;
+            }
+        }
+
+        // 清理文本：移除換行符，將多個連續空格合併為單個空格，但保留原本就存在的空格（如英文單詞之間）
+        const cleanedText = fullText.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+        sentences = cleanedText ? cleanedText.split(/(?<=[。！？])/).filter(s => s.trim()) : [];
+        currentSentenceIndex = 0;
+    }
 
 function cancelReading() {
   isReading = false;
@@ -2121,16 +2126,47 @@ function readNextSentence() {
             if (!isReading) {
                 return;
             }
-            
+
             currentSentenceIndex++;
             if (currentSentenceIndex < sentences.length && isReading) {
                 readNextSentence();
             } else {
-                isReading = false;
+                // 當前頁朗讀完畢
                 clearHighlights();
-                selectAllTextButton.textContent = "整頁朗讀";
-                selectAllTextButton.classList.remove('button-danger');
-                selectAllTextButton.classList.add('button-light');
+
+                // 若還有下一頁，則自動翻頁並繼續朗讀
+                if (pdfDoc && typeof currentPage !== 'undefined' && currentPage < pdfDoc.numPages) {
+                    currentPage++;
+                    renderPage(currentPage);
+                    setTimeout(() => {
+                        // 朗讀過程中如果被取消，就不要再繼續
+                        if (!isReading) {
+                            return;
+                        }
+
+                        prepareSentencesFromCurrentPage();
+
+                        if (sentences.length > 0) {
+                            startReading();
+                        } else {
+                            // 如果該頁沒有可朗讀內容，直接結束
+                            isReading = false;
+                            selectAllTextButton.textContent = "整頁朗讀";
+                            selectAllTextButton.classList.remove('button-danger');
+                            selectAllTextButton.classList.add('button-light');
+                        }
+                    }, 600); // 等待頁面渲染完成
+
+                    if (typeof notifyPageChange === 'function') {
+                        notifyPageChange(currentPage);
+                    }
+                } else {
+                    // 已經是最後一頁，結束整體朗讀
+                    isReading = false;
+                    selectAllTextButton.textContent = "整頁朗讀";
+                    selectAllTextButton.classList.remove('button-danger');
+                    selectAllTextButton.classList.add('button-light');
+                }
             }
         });
     }
@@ -5918,11 +5954,7 @@ async function editMarkReplacementText(markId, pageNum) {
             <div style="text-align: left; margin-bottom: 20px; width: 100%; box-sizing: border-box;">
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; width: 95%; box-sizing: border-box;">
                     <label style="font-weight: bold; font-size: 18px; color: #333; margin: 0;">原始文字：</label>
-                    <div style="display: flex; gap: 8px;">
-                        <!-- AI圖片辨識：點選後以 Gemini 辨識該標記區塊內圖片，辨識結果會顯示在下方「原始文字」欄位（等同送給 TTS 的文本） -->
-                        <button id="aiImageRecognizeBtn" type="button" style="padding: 6px 12px; background-color: #6f42c1; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: normal; white-space: nowrap; pointer-events: auto; z-index: 10000; position: relative;" title="以 AI 辨識標記區域內的圖片，並將結果填入原始文字">AI圖片辨識</button>
-                        <button id="copyOriginalTextBtn" type="button" onclick="window.copyOriginalToReplacement && window.copyOriginalToReplacement()" style="padding: 6px 12px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: normal; white-space: nowrap; pointer-events: auto; z-index: 10000; position: relative;">複製到替換文字</button>
-                    </div>
+                    <button id="copyOriginalTextBtn" type="button" onclick="window.copyOriginalToReplacement && window.copyOriginalToReplacement()" style="padding: 6px 12px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: normal; white-space: nowrap; pointer-events: auto; z-index: 10000; position: relative;">複製到替換文字</button>
                 </div>
                 <div id="originalTextDisplay" style="width: 95%; margin-left: 0; margin-right: auto; padding: 12px 12px 12px 0; background-color: #f5f5f5; border: 1px solid #ddd; border-radius: 6px; min-height: 50px; max-height: 300px; overflow-y: auto; word-wrap: break-word; word-break: break-all; font-size: 15px; line-height: 1.8; color: #555; box-sizing: border-box; white-space: pre-wrap; font-family: inherit; cursor: pointer;" title="點擊此處發音">${displayText.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
             </div>
@@ -5972,95 +6004,8 @@ async function editMarkReplacementText(markId, pageNum) {
                 }
             };
             
-            // ---------- AI圖片辨識按鈕：取得標記區域圖片 → 呼叫 Gemini 辨識 → 將送給 TTS 的文本顯示在「原始文字」欄位 ----------
-            window.runAiImageRecognizeForEdit = async function() {
-                const originalDisplay = document.getElementById('originalTextDisplay');
-                const aiBtn = document.getElementById('aiImageRecognizeBtn');
-                if (!originalDisplay || !aiBtn) return;
-                const markLayer = document.querySelector(`.mark-layer[data-page-num="${pageNum}"]`);
-                if (!markLayer) {
-                    Swal.fire({ icon: 'warning', title: '無法取得標記', text: '找不到該頁的標記層，請確認該頁已載入', customClass: { popup: 'swal-high-z-index' } });
-                    return;
-                }
-                const viewerContainer = document.getElementById('viewerContainer');
-                const pdfCanvas = viewerContainer ? viewerContainer.querySelector('canvas') : null;
-                if (!pdfCanvas) {
-                    Swal.fire({ icon: 'warning', title: '無法辨識', text: '找不到 PDF 畫布', customClass: { popup: 'swal-high-z-index' } });
-                    return;
-                }
-                let cropRect;
-                const markBlockEl = markLayer.querySelector(`[data-mark-id="${markId}"]`);
-                if (markBlockEl) {
-                    cropRect = markBlockEl.getBoundingClientRect();
-                } else {
-                    const layerRect = markLayer.getBoundingClientRect();
-                    cropRect = { left: layerRect.left + mark.x, top: layerRect.top + mark.y, width: mark.width, height: mark.height };
-                }
-                const cropCanvasFunc = window.cropCanvas || (typeof cropCanvas !== 'undefined' ? cropCanvas : null);
-                const toBase64Func = window.canvasToBase64 || (typeof canvasToBase64 !== 'undefined' ? canvasToBase64 : null);
-                if (!cropCanvasFunc || !toBase64Func) {
-                    Swal.fire({ icon: 'error', title: '功能未載入', text: '裁剪或轉換函數不可用', customClass: { popup: 'swal-high-z-index' } });
-                    return;
-                }
-                const croppedCanvas = cropCanvasFunc(pdfCanvas, cropRect);
-                const base64Image = toBase64Func(croppedCanvas);
-                const isWhiteFunc = window.isCanvasAllWhite || (typeof isCanvasAllWhite !== 'undefined' ? isCanvasAllWhite : null);
-                if (isWhiteFunc && isWhiteFunc(croppedCanvas)) {
-                    Swal.fire({ icon: 'warning', title: '沒有圖片內容', text: '標記區域內沒有可辨識的圖片', customClass: { popup: 'swal-high-z-index' } });
-                    return;
-                }
-                let apiKey = null;
-                try { apiKey = await loadApiKeyFromIndexedDB(); } catch (_) {}
-                if (!apiKey || !apiKey.trim()) {
-                    Swal.fire({ icon: 'warning', title: '請先設定 API KEY', text: '請在設定中填寫 Gemini API KEY 以使用 AI 圖片辨識', customClass: { popup: 'swal-high-z-index' } });
-                    return;
-                }
-                aiBtn.disabled = true;
-                aiBtn.textContent = '辨識中...';
-                try {
-                    Swal.fire({ title: '正在辨識圖片', text: '正在使用 AI 辨識圖片內容...（Gemini）', allowOutsideClick: false, customClass: { popup: 'swal-high-z-index' }, didOpen: () => { Swal.showLoading(); } });
-                    const geminiFunc = window.geminiImageDescribe || (typeof geminiImageDescribe !== 'undefined' ? geminiImageDescribe : null);
-                    if (!geminiFunc) {
-                        Swal.close();
-                        throw new Error('Gemini 辨識函數未載入');
-                    }
-                    const aiText = await geminiFunc(base64Image);
-                    Swal.close();
-                    if (aiText && aiText.trim()) {
-                        const recognizedText = aiText.trim();
-                        displayText = recognizedText;
-                        originalDisplay.textContent = displayText;
-                        // 將 AI 辨識結果寫入替換文字欄位並存到標記、保存至 PDF
-                        const replacementInput = document.getElementById('replacementTextInput');
-                        if (replacementInput) replacementInput.value = recognizedText;
-                        mark.replacementText = recognizedText;
-                        await saveMarksToPdf(false);
-                        aiBtn.textContent = '已填入並保存';
-                        aiBtn.style.backgroundColor = '#28a745';
-                        setTimeout(() => { aiBtn.textContent = 'AI圖片辨識'; aiBtn.style.backgroundColor = '#6f42c1'; }, 2000);
-                    } else {
-                        Swal.fire({ icon: 'warning', title: '辨識結果為空', text: 'AI 無法辨識圖片內容', customClass: { popup: 'swal-high-z-index' } });
-                    }
-                } catch (err) {
-                    Swal.close();
-                    console.error('AI圖片辨識錯誤:', err);
-                    Swal.fire({ icon: 'error', title: '辨識失敗', text: (err && err.message) ? err.message : 'AI 辨識過程中發生錯誤', customClass: { popup: 'swal-high-z-index' } });
-                } finally {
-                    aiBtn.disabled = false;
-                    if (aiBtn.textContent === '辨識中...') aiBtn.textContent = 'AI圖片辨識';
-                }
-            };
-            
             // 也使用 addEventListener 作為備用（延遲綁定確保 DOM 已準備好）
             setTimeout(() => {
-                const aiRecognizeBtn = document.getElementById('aiImageRecognizeBtn');
-                if (aiRecognizeBtn) {
-                    aiRecognizeBtn.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (window.runAiImageRecognizeForEdit) window.runAiImageRecognizeForEdit();
-                    });
-                }
                 const copyBtn = document.getElementById('copyOriginalTextBtn');
                 if (copyBtn) {
                     copyBtn.addEventListener('click', (e) => {
