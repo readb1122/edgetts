@@ -2662,11 +2662,12 @@ window.addEventListener('load', () => {
   /**
    * 首次開啟與重新載入共用同一套「可互動」就緒條件，避免網路串流只先出 canvas、流程卻與 F5 後不一致。
    * 條件：pagesloaded + 目前頁 textlayerrendered + 該頁 canvas 已出現 + 最短停留（與後續 kick 銜接）。
+   * 遮罩僅在 PDF 就緒後關閉：不設幾秒強制關閉，且 window.load 時若 eventBus 尚未建立則輪詢綁定（避免 600ms 誤關）。
    */
   const INITIAL_COVER_MIN_MS = 520;
-  const INITIAL_COVER_FALLBACK_MS = 4500;
+  const COVER_BIND_MAX_WAIT_MS = 45 * 60 * 1000;
+  const COVER_NO_FILE_PARAM_HIDE_MS = 650;
 
-  // 首次開啟（尤其雲端/IDB 重導）避免先看到 PDF 白底閃屏：就緒後再移除遮罩
   const initialCover = document.getElementById('initialRenderCover');
   if (initialCover) {
     const hideCover = () => {
@@ -2694,7 +2695,47 @@ window.addEventListener('load', () => {
         });
       });
     };
-    if (eb && typeof eb._on === 'function') {
+
+    const coverBindT0 = Date.now();
+    let hasFileParam = false;
+    try {
+      const u = new URL(window.location.href);
+      hasFileParam = !!(u.searchParams.get('file') || '').trim();
+    } catch (_) {
+      hasFileParam = false;
+    }
+    if (!hasFileParam) {
+      // 沒有 ?file= 代表不需等待遠端檔案流程，避免空白首頁長時間停留在載入遮罩。
+      setTimeout(() => {
+        if (initialCover.dataset.pdfjsCoverBound === '1') return;
+        initialCover.dataset.pdfjsCoverBound = '1';
+        scheduleHideCover();
+      }, COVER_NO_FILE_PARAM_HIDE_MS);
+      return;
+    }
+    const bindInitialCoverWhenReady = () => {
+      if (initialCover.dataset.pdfjsCoverBound === '1') {
+        return;
+      }
+      const ebNow = window.PDFViewerApplication?.eventBus;
+      if (!ebNow || typeof ebNow._on !== 'function') {
+        // 沒有 ?file= 時代表非遠端 bootstrap 場景，不要長時間停留在載入動畫。
+        if (!hasFileParam && Date.now() - coverBindT0 > COVER_NO_FILE_PARAM_HIDE_MS) {
+          initialCover.dataset.pdfjsCoverBound = '1';
+          scheduleHideCover();
+          return;
+        }
+        if (Date.now() - coverBindT0 > COVER_BIND_MAX_WAIT_MS) {
+          initialCover.dataset.pdfjsCoverBound = '1';
+          scheduleHideCover();
+          return;
+        }
+        setTimeout(bindInitialCoverWhenReady, 100);
+        return;
+      }
+
+      initialCover.dataset.pdfjsCoverBound = '1';
+
       let hidden = false;
       let textLayerFallbackTid = 0;
       const coverWait = {
@@ -2705,8 +2746,9 @@ window.addEventListener('load', () => {
       const syncPagesLoaded = () => {
         if (coverWait.pagesLoaded) return;
         try {
-          const num = app?.pdfDocument?.numPages;
-          const cnt = app?.pdfViewer?.pagesCount;
+          const a = window.PDFViewerApplication;
+          const num = a?.pdfDocument?.numPages;
+          const cnt = a?.pdfViewer?.pagesCount;
           if (num && cnt && cnt >= num) coverWait.pagesLoaded = true;
         } catch (_) {}
       };
@@ -2722,14 +2764,16 @@ window.addEventListener('load', () => {
         hidden = true;
         scheduleHideCover();
       };
-      eb._on('pagesloaded', () => {
+
+      ebNow._on('pagesloaded', () => {
         coverWait.pagesLoaded = true;
         tryRevealCover();
       });
-      eb._on('textlayerrendered', evt => {
+      ebNow._on('textlayerrendered', evt => {
         if (hidden) return;
         if (evt?.error) return;
-        const want = app?.pdfViewer?.currentPageNumber;
+        const a = window.PDFViewerApplication;
+        const want = a?.pdfViewer?.currentPageNumber;
         if (want != null && evt?.pageNumber != null && evt.pageNumber === want) {
           if (textLayerFallbackTid) {
             clearTimeout(textLayerFallbackTid);
@@ -2744,16 +2788,16 @@ window.addEventListener('load', () => {
         syncPagesLoaded();
         tryRevealCover();
       });
-      eb._on('pagerendered', evt => {
+      ebNow._on('pagerendered', evt => {
         if (hidden) return;
         if (evt?.cssTransform) return;
-        const viewer = app?.pdfViewer;
+        const a = window.PDFViewerApplication;
+        const viewer = a?.pdfViewer;
         const want = viewer?.currentPageNumber;
         if (want != null && evt && evt.pageNumber != null && evt.pageNumber !== want) {
           return;
         }
         if (!coverWait.firstCanvasAt) coverWait.firstCanvasAt = Date.now();
-        // 掃描件／關閉文字層時可能等不到 textlayerrendered，勿卡到 fallback 4.5s
         if (textLayerFallbackTid) clearTimeout(textLayerFallbackTid);
         textLayerFallbackTid = setTimeout(() => {
           textLayerFallbackTid = 0;
@@ -2764,15 +2808,10 @@ window.addEventListener('load', () => {
         }, 880);
         tryRevealCover();
       });
-      setTimeout(() => {
-        if (!hidden) {
-          hidden = true;
-          scheduleHideCover();
-        }
-      }, INITIAL_COVER_FALLBACK_MS);
-    } else {
-      setTimeout(scheduleHideCover, 600);
-    }
+    };
+
+    bindInitialCoverWhenReady();
+
     if (app?.pdfDocument) {
       requestAnimationFrame(() => kickPdfViewerVisibleRefresh());
     }
