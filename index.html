@@ -344,6 +344,11 @@ audio {
             -ms-user-select: text;
             pointer-events: auto;
             font-synthesis: none;
+            text-rendering: geometricPrecision;
+            letter-spacing: 0;
+            word-spacing: 0;
+            font-kerning: none;
+            font-variant-ligatures: none;
         }
         .textLayer > span.highlight {
             background-color: transparent !important;
@@ -355,6 +360,11 @@ audio {
             background-color: transparent;
             font-synthesis: none;
             cursor: default;
+            font: inherit;
+            line-height: inherit;
+            letter-spacing: inherit;
+            word-spacing: inherit;
+            vertical-align: baseline;
         }
         body.touch-select-active .textLayer > span,
         body.touch-select-active .textLayer > my-fra {
@@ -835,6 +845,213 @@ const pageNumberSpan = document.getElementById('pageNumber');
 let pdfDoc = null;
 let currentPage = 1;
 
+/**
+ * 與 PDF 標籤分析器相同：每個有 str 欄位的 textContent item 對應一筆 transform，寫入該 run 的 span 的 data-transform。
+ * 須與 pdf.js renderTextLayer 的 textDivs 順序一致：appendText 會對 str==="" 仍 push 一個 div，
+ * 不可再用「!raw 就 skip」，否則會整串錯位、去重交叉比對失效（標籤分析器自建 DOM 時可略過空字串，此處不可）。
+ */
+function syncPdfDataTransformToTextLayerElements(textDivs, textLayerDiv, textContent) {
+    if (!textContent || !Array.isArray(textContent.items)) return;
+    let order = [];
+    if (Array.isArray(textDivs) && textDivs.length) {
+        order = textDivs.filter(Boolean);
+    } else if (textLayerDiv) {
+        order = Array.from(textLayerDiv.querySelectorAll('span[role="presentation"]'));
+    }
+    let si = 0;
+    for (let i = 0; i < textContent.items.length; i++) {
+        const item = textContent.items[i];
+        if (!item || item.str === undefined) {
+            continue;
+        }
+        const el = order[si++];
+        if (el) {
+            try {
+                el.dataset.transform = JSON.stringify(item.transform || []);
+                if (item.fontName) {
+                    el.dataset.fontName = item.fontName;
+                }
+            } catch (e) { /* ignore */ }
+        }
+    }
+}
+
+function parsePdfDataTransformFromSpan(span) {
+    if (!span || !span.dataset || !span.dataset.transform) return null;
+    try {
+        const a = JSON.parse(span.dataset.transform);
+        if (!Array.isArray(a) || a.length < 6) return null;
+        return { a: a[0], b: a[1], c: a[2], d: a[3], e: a[4], f: a[5] };
+    } catch (e) {
+        return null;
+    }
+}
+
+function pdfUserSpaceAxisAligned(pt) {
+    return pt && Math.abs(pt.b) < 1e-4 && Math.abs(pt.c) < 1e-4;
+}
+
+/**
+ * 假粗體／描邊：PDF 常把同一字串用極小 (e,f) 偏移畫 2～4 次；pdf.js 會給每層不同 left/top，
+ * 文字層看起來散開、與 canvas 合成筆畫錯位。將「同字、同字型、PDF 原點距離極小」的 run 併成同一 left/top（取平均），
+ * 僅處理水平軸對齊矩陣，避免影響旋轉字。
+ */
+function alignFauxBoldOverlaySpanPositions(textLayerDiv) {
+    if (!textLayerDiv) return;
+    const BOLD_STACK_MAX_DPDF = 2.2;
+    const spans = Array.from(textLayerDiv.querySelectorAll('span[role="presentation"]')).filter((s) => {
+        const t = normalizePresentationSpanTextForDedupe(s);
+        if (!t) return false;
+        const pt = parsePdfDataTransformFromSpan(s);
+        return pdfUserSpaceAxisAligned(pt);
+    });
+    const n = spans.length;
+    if (n < 2) return;
+
+    const parent = new Uint32Array(n);
+    for (let i = 0; i < n; i++) parent[i] = i;
+    function find(i) {
+        if (parent[i] !== i) parent[i] = find(parent[i]);
+        return parent[i];
+    }
+    function union(a, b) {
+        const ra = find(a);
+        const rb = find(b);
+        if (ra !== rb) parent[ra] = rb;
+    }
+
+    const pts = spans.map((s) => parsePdfDataTransformFromSpan(s));
+    const fonts = spans.map((s) => s.dataset.fontName || '');
+    const texts = spans.map((s) => normalizePresentationSpanTextForDedupe(s));
+
+    for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+            if (texts[i] !== texts[j] || fonts[i] !== fonts[j]) continue;
+            const d = Math.hypot(pts[i].e - pts[j].e, pts[i].f - pts[j].f);
+            if (d <= BOLD_STACK_MAX_DPDF) {
+                union(i, j);
+            }
+        }
+    }
+
+    const groups = new Map();
+    for (let i = 0; i < n; i++) {
+        const r = find(i);
+        if (!groups.has(r)) groups.set(r, []);
+        groups.get(r).push(i);
+    }
+
+    function parsePx(val) {
+        const v = parseFloat(String(val || '').replace(/px\s*$/i, ''));
+        return Number.isFinite(v) ? v : 0;
+    }
+
+    for (const idxs of groups.values()) {
+        if (idxs.length < 2) continue;
+        const members = idxs.map((k) => spans[k]);
+        let sumL = 0;
+        let sumT = 0;
+        for (const el of members) {
+            sumL += parsePx(el.style.left);
+            sumT += parsePx(el.style.top);
+        }
+        const cnt = members.length;
+        const leftPx = `${sumL / cnt}px`;
+        const topPx = `${sumT / cnt}px`;
+        for (const el of members) {
+            el.style.left = leftPx;
+            el.style.top = topPx;
+        }
+    }
+}
+
+function iouClientRectsForDedupe(a, b) {
+    const il = Math.max(a.left, b.left);
+    const ir = Math.min(a.right, b.right);
+    const it = Math.max(a.top, b.top);
+    const ib = Math.min(a.bottom, b.bottom);
+    const iw = Math.max(0, ir - il);
+    const ih = Math.max(0, ib - it);
+    const inter = iw * ih;
+    if (inter <= 0) return 0;
+    const areaA = Math.max(1e-6, (a.right - a.left) * (a.bottom - a.top));
+    const areaB = Math.max(1e-6, (b.right - b.left) * (b.bottom - b.top));
+    return inter / (areaA + areaB - inter);
+}
+
+function comparePresentationSpanReadingOrder(a, b) {
+    const ra = a.getBoundingClientRect();
+    const rb = b.getBoundingClientRect();
+    const lineTol = Math.max(3, Math.min(ra.height, rb.height) * 0.5);
+    if (Math.abs(ra.top - rb.top) > lineTol) {
+        return ra.top - rb.top;
+    }
+    return ra.left - rb.left;
+}
+
+function normalizePresentationSpanTextForDedupe(span) {
+    return (span.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 依使用者需求：停用標記區提取時的疊層去重，僅保留閱讀順序排序。
+ */
+function dedupeBoldOverlayPresentationSpans(spans) {
+    return [...spans].sort(comparePresentationSpanReadingOrder);
+}
+
+function spanOverlapsMarkInTextLayerCoords(spanRect, textLayerRect, markInTextLayer) {
+    const spanX = spanRect.left - textLayerRect.left;
+    const spanY = spanRect.top - textLayerRect.top;
+    const spanRight = spanRect.right - textLayerRect.left;
+    const spanBottom = spanRect.bottom - textLayerRect.top;
+    return !(spanRight < markInTextLayer.left ||
+        spanX > markInTextLayer.right ||
+        spanBottom < markInTextLayer.top ||
+        spanY > markInTextLayer.bottom);
+}
+
+/**
+ * 標記區內文字：先取與標記重疊的 presentation span，做 PDF transform 交叉比對去重後再組字串。
+ * @param {{ preserveLineBreaks?: boolean }} options
+ */
+function collectPdfTextRunSpans(textLayer) {
+    let spans = Array.from(textLayer.querySelectorAll('span[data-transform]'));
+    if (!spans.length) {
+        spans = Array.from(textLayer.querySelectorAll('span[role="presentation"]'));
+    }
+    return spans;
+}
+
+function extractMarkRegionTextViaPresentationSpans(textLayer, textLayerRect, markInTextLayer, options) {
+    const preserveLineBreaks = !(options && options.preserveLineBreaks === false);
+    const pres = collectPdfTextRunSpans(textLayer).filter((span) => {
+        const r = span.getBoundingClientRect();
+        return spanOverlapsMarkInTextLayerCoords(r, textLayerRect, markInTextLayer);
+    });
+    const deduped = dedupeBoldOverlayPresentationSpans(pres);
+    deduped.sort(comparePresentationSpanReadingOrder);
+    let text = '';
+    let lastSpanY = null;
+    let lastSpanBottom = null;
+    for (const span of deduped) {
+        const spanRect = span.getBoundingClientRect();
+        const spanY = spanRect.top - textLayerRect.top;
+        const spanBottom = spanRect.bottom - textLayerRect.top;
+        if (preserveLineBreaks && lastSpanY !== null && lastSpanBottom !== null) {
+            const yGap = spanY - lastSpanBottom;
+            const fontSize = spanRect.height || 16;
+            if (yGap > fontSize * 0.5) {
+                text += '\n';
+            }
+        }
+        text += span.textContent;
+        lastSpanY = spanY;
+        lastSpanBottom = spanBottom;
+    }
+    return text;
+}
+
 // Function to render the page with dynamic width
 function renderPage(pageNum) {
     if (!pdfDoc) return;
@@ -908,42 +1125,51 @@ function renderPage(pageNum) {
             return page.getTextContent();
         }).then(textContent => {
             textLayerDiv.innerHTML = '';
-            pdfjsLib.renderTextLayer({
+            const textDivs = [];
+            const textLayerTask = pdfjsLib.renderTextLayer({
                 textContent: textContent,
                 container: textLayerDiv,
                 viewport: scaledViewport,
-                textDivs: [],
-                enhanceTextSelection: true
+                textDivs: textDivs,
+                /* 勿開 enhanceTextSelection：PDF 粗體常以重疊文字模擬，pdf.js 會用 padding/transform 推開重疊框以利選取，導致文字層與 canvas 跑位。本頁以 my-fra 觸控選字為主，關閉後與列印座標一致。 */
+                enhanceTextSelection: false
             });
 
-            // 修正文字層的縮放和位置
-            const textElements = textLayerDiv.getElementsByTagName('span');
-            for (let span of textElements) {
-                const originalTransform = span.style.transform || '';
-                span.style.transform = originalTransform.replace(/scale\([^)]+\)/, `scale(${1/dpi})`);
-            }
-            
-            // 在文字層渲染完成後，延遲渲染標記
-            setTimeout(() => {
-                renderMarks();
-                // 如果處於標記模式，確保標記層事件已啟用並設置游標
-                if (isMarkingMode) {
-                    const markLayer = document.querySelector(`.mark-layer[data-page-num="${pageNum}"]`);
-                    const pdfViewer = document.querySelector('.pdf-viewer');
-                    const canvas = pdfViewer ? pdfViewer.querySelector('canvas') : null;
-                    if (markLayer) {
-                        markLayer.classList.add('marking-mode');
-                    }
-                    if (pdfViewer) {
-                        pdfViewer.addEventListener('mousedown', handleViewerMouseDown);
-                        pdfViewer.addEventListener('touchstart', handleViewerTouchStart);
-                        pdfViewer.style.setProperty('cursor', 'crosshair', 'important');
-                    }
-                    if (canvas) {
-                        canvas.style.setProperty('cursor', 'crosshair', 'important');
-                    }
+            const finishTextLayer = () => {
+                /* Canvas 以 context.scale(dpi,dpi) 繪於邏輯 viewport 座標；文字層同 viewport，無需改 span 的 scaleX（pdf.js 2.11 亦使用 scaleX 而非 scale）。舊版對 scale() 的替換對粗體無效且易造成誤解，故移除。 */
+                syncPdfDataTransformToTextLayerElements(textDivs, textLayerDiv, textContent);
+                alignFauxBoldOverlaySpanPositions(textLayerDiv);
+                if (document.fonts && typeof document.fonts.ready !== 'undefined' && document.fonts.ready.then) {
+                    document.fonts.ready.then(() => {
+                        requestAnimationFrame(() => alignFauxBoldOverlaySpanPositions(textLayerDiv));
+                    });
                 }
-            }, 300);
+                setTimeout(() => {
+                    alignFauxBoldOverlaySpanPositions(textLayerDiv);
+                    renderMarks();
+                    if (isMarkingMode) {
+                        const markLayer = document.querySelector(`.mark-layer[data-page-num="${pageNum}"]`);
+                        const pdfViewer = document.querySelector('.pdf-viewer');
+                        const canvas = pdfViewer ? pdfViewer.querySelector('canvas') : null;
+                        if (markLayer) {
+                            markLayer.classList.add('marking-mode');
+                        }
+                        if (pdfViewer) {
+                            pdfViewer.addEventListener('mousedown', handleViewerMouseDown);
+                            pdfViewer.addEventListener('touchstart', handleViewerTouchStart);
+                            pdfViewer.style.setProperty('cursor', 'crosshair', 'important');
+                        }
+                        if (canvas) {
+                            canvas.style.setProperty('cursor', 'crosshair', 'important');
+                        }
+                    }
+                }, 300);
+            };
+
+            if (textLayerTask && textLayerTask.promise && typeof textLayerTask.promise.then === 'function') {
+                return textLayerTask.promise.then(finishTextLayer);
+            }
+            finishTextLayer();
         });
 
         pageNumberSpan.textContent = `Page ${pageNum} of ${pdfDoc.numPages}`;
@@ -2102,72 +2328,11 @@ if (typeof window !== 'undefined') {
     window.normalizeCircledDigitsForDisplay = normalizeCircledDigitsForDisplay;
 }
 
-/**
- * 粗體／疊層 PDF 造成相鄰重複字串（可達 4 次以上）；送 TTS 前收斂（與 viewer-reading.js 一致）。
- */
-function collapseAdjacentDuplicateRunsForTts(s) {
+/** 依使用者需求：各式朗讀皆停用去重；僅保留基本清理（移除隱藏字元、壓縮空白）。 */
+function collapseAdjacentDuplicateRunsForTts(s, options) {
     if (!s || typeof s !== 'string') return s;
     let t = s.replace(/[\u200b-\u200d\ufeff\u2060\u00ad]/g, '');
     t = t.replace(/\s+/g, ' ').trim();
-    if (t.length < 2) return t;
-
-    let ps = '';
-    let g0 = 0;
-    while (ps !== t && g0++ < 48) {
-        ps = t;
-        t = t.replace(/([\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef])\s+\1/gu, '$1$1');
-    }
-
-    const maxUnit = 300;
-    let round = 0;
-    let changed = true;
-    while (changed && round++ < 120) {
-        changed = false;
-        const parts = [];
-        let i = 0;
-        while (i < t.length) {
-            const maxLen = Math.min(maxUnit, Math.floor((t.length - i) / 2));
-            let applied = false;
-            for (let len = maxLen; len >= 1; len--) {
-                if (i + 2 * len > t.length) continue;
-                const chunk = t.slice(i, i + len);
-                let j = i + len;
-                let reps = 1;
-                while (j + len <= t.length && t.slice(j, j + len) === chunk) {
-                    reps++;
-                    j += len;
-                }
-                if (reps < 2) continue;
-                if (len === 1 && reps < 4) continue;
-                parts.push(chunk);
-                i = j;
-                applied = true;
-                changed = true;
-                break;
-            }
-            if (!applied) {
-                parts.push(t[i]);
-                i++;
-            }
-        }
-        t = parts.join('');
-    }
-
-    const cjkSpan = String.raw`(?:[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef\u2460-\u2473])`;
-    let prev = '';
-    let guard = 0;
-    while (prev !== t && guard++ < 24) {
-        prev = t;
-        t = t.replace(new RegExp(`(${cjkSpan}{2,}?)(?:\\1)+`, 'gu'), '$1');
-        t = t.replace(new RegExp(`(${cjkSpan})(?:\\1)+`, 'gu'), '$1');
-    }
-    prev = '';
-    guard = 0;
-    while (prev !== t && guard++ < 16) {
-        prev = t;
-        t = t.replace(/([A-Za-z]{2,})(?:\1)+/g, '$1');
-        t = t.replace(/([0-9０-９]{2,})(?:\1)+/g, '$1');
-    }
     return t;
 }
 if (typeof window !== 'undefined') {
@@ -2234,7 +2399,8 @@ async function sendTextToTTS(selectedText, callback, options = {}) {
         return;
     }
 
-    cleanedText = collapseAdjacentDuplicateRunsForTts(cleanedText);
+    const ttsDedupeOpts = options.pdfAnchoredTtsText ? { pdfAnchoredTtsText: true } : {};
+    cleanedText = collapseAdjacentDuplicateRunsForTts(cleanedText, ttsDedupeOpts);
 
     // 先 TTS 正規化（①→，1，）再套試算表；與「替換語詞」朗讀一致。勿先 plain 再 TTS。
     let filteredText;
@@ -2246,7 +2412,7 @@ async function sendTextToTTS(selectedText, callback, options = {}) {
         filteredText = normalizeCircledDigitsForTts(cleanedText);
     }
 
-    filteredText = collapseAdjacentDuplicateRunsForTts(filteredText);
+    filteredText = collapseAdjacentDuplicateRunsForTts(filteredText, ttsDedupeOpts);
     
     console.log("送出給 TTS 的文本:", filteredText);
     console.log("文本長度:", filteredText.length);
@@ -3186,8 +3352,14 @@ if (typeof window !== 'undefined') {
   let isPlayingWaitingMessage = false; // 防止"圖片辨識中，請稍候"語音重複播放
 
  function wrapTextInFraTags() {
-    const markedContentSpans = document.querySelectorAll('span[role="presentation"]');
-    
+    const seen = new Set();
+    const markedContentSpans = [];
+    document.querySelectorAll('span[role="presentation"], span[data-transform]').forEach((el) => {
+        if (seen.has(el)) return;
+        seen.add(el);
+        markedContentSpans.push(el);
+    });
+
     markedContentSpans.forEach(span => {
         if (!span.dataset.processed) {
             const text = span.textContent;
@@ -3212,6 +3384,8 @@ if (typeof window !== 'undefined') {
 let isMouseDown = false;
 let lastSelectedFraForButton = null;
 let touchReadFloatingButton = null;
+let touchCancelFloatingButton = null;
+let lastReadingFraForCancelButton = null;
 let selectionDragMode = null; // 'add' | 'remove'
 let touchFraCandidates = [];
 let isTouchSelectionReading = false;
@@ -3233,10 +3407,13 @@ window.setTouchSelectOffset = function(x = 0, y = 0) {
 function setTouchSelectionReadingState(next) {
     isTouchSelectionReading = !!next;
     updateTouchReadFloatingButton();
+    updateTouchCancelFloatingButton();
 }
 
 function stopTouchSelectionPlayback() {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
+    // 同步作廢未完成的雲端 TTS，避免切換「觸控選取」時回放上一段音檔
+    resetAudioPlayerAndInvalidatePendingTts();
     const audioPlayer = document.getElementById('audioPlayer');
     if (audioPlayer) {
         audioPlayer.pause();
@@ -3269,19 +3446,42 @@ function ensureTouchReadFloatingButton() {
         const now = Date.now();
         if (now - lastTouchReadToggleAt < 250) return; // 防止連點造成狀態競態
         lastTouchReadToggleAt = now;
-        if (isTouchSelectionReading) {
-            touchSelectionReadToken++;
-            stopTouchSelectionPlayback();
-            setTouchSelectionReadingState(false);
-            hideTouchReadButtonUntilNextSelection = true;
-            updateTouchReadFloatingButton();
-            return;
-        }
         const token = ++touchSelectionReadToken;
         setTouchSelectionReadingState(true);
         sendHighlightedText(token);
     });
     touchReadFloatingButton = btn;
+    return btn;
+}
+
+function ensureTouchCancelFloatingButton() {
+    if (touchCancelFloatingButton) return touchCancelFloatingButton;
+    const btn = document.createElement('button');
+    btn.id = 'touch-cancel-read-floating-btn';
+    btn.className = 'button button-danger';
+    btn.textContent = '取消朗讀';
+    btn.style.position = 'fixed';
+    btn.style.zIndex = '3501';
+    btn.style.display = 'none';
+    btn.style.padding = '8px 12px';
+    btn.style.fontSize = '16px';
+    btn.style.fontWeight = 'bold';
+    btn.style.whiteSpace = 'nowrap';
+    btn.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.25)';
+    btn.style.borderRadius = '8px';
+    document.body.appendChild(btn);
+    btn.addEventListener('click', function() {
+        const now = Date.now();
+        if (now - lastTouchReadToggleAt < 250) return;
+        lastTouchReadToggleAt = now;
+        touchSelectionReadToken++;
+        stopTouchSelectionPlayback();
+        setTouchSelectionReadingState(false);
+        hideTouchReadButtonUntilNextSelection = true;
+        updateTouchReadFloatingButton();
+        updateTouchCancelFloatingButton();
+    });
+    touchCancelFloatingButton = btn;
     return btn;
 }
 
@@ -3404,9 +3604,30 @@ function updateTouchReadFloatingButton() {
     const top = Math.max(8, rect.top - 44);
     btn.style.left = `${left}px`;
     btn.style.top = `${top}px`;
-    btn.textContent = isTouchSelectionReading ? '取消朗讀' : '開始朗讀';
-    btn.classList.toggle('button-danger', isTouchSelectionReading);
-    btn.classList.toggle('button-light', !isTouchSelectionReading);
+    btn.textContent = '開始朗讀';
+    btn.classList.remove('button-danger');
+    btn.classList.add('button-light');
+    btn.style.display = 'block';
+}
+
+function updateTouchCancelFloatingButton() {
+    const checkbox = document.getElementById('touchSelectCheckbox');
+    const btn = ensureTouchCancelFloatingButton();
+    const target = lastReadingFraForCancelButton || getLastSelectedFra();
+    if (!checkbox || !checkbox.checked || !isTouchSelectionReading || !target) {
+        btn.style.display = 'none';
+        return;
+    }
+    const rect = target.getBoundingClientRect();
+    if (!rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.left)) {
+        btn.style.display = 'none';
+        return;
+    }
+    const btnWidth = btn.offsetWidth || 92;
+    const left = Math.max(8, Math.min(window.innerWidth - btnWidth - 8, rect.left + rect.width / 2 - btnWidth / 2));
+    const top = Math.max(8, rect.top - 44);
+    btn.style.left = `${left}px`;
+    btn.style.top = `${top}px`;
     btn.style.display = 'block';
 }
 
@@ -3450,6 +3671,7 @@ document.addEventListener('touchend', () => {
     const fra = resolveFraFromPoint(pointX, pointY, element);
     if (!fra) return;
     if (fra === lastTouchElement) return;
+
     if (isStartEvent || !selectionDragMode) {
         selectionDragMode = fra.style.backgroundColor === 'rgba(255, 0, 0, 0.2)' ? 'remove' : 'add';
     }
@@ -3484,6 +3706,7 @@ document.addEventListener('touchend', () => {
             }
             
             const highlightedText = [];
+            const spokenFra = [];
             const textLayerDivs = document.getElementById('viewerContainer').getElementsByClassName('textLayer');
             
             for (let textLayer of textLayerDivs) {
@@ -3493,6 +3716,7 @@ document.addEventListener('touchend', () => {
                         // 檢查是否在標記區域內，如果在且標記有替換文字，使用替換文字
                         const textToAdd = getTextWithMarkReplacement(span, textLayer);
                         highlightedText.push(textToAdd);
+                        spokenFra.push(span);
                         span.style.backgroundColor = 'rgba(255, 255, 0, 0.2)'; // 已發音的標示
                         span.dataset.spoken = 'true'; // 標記為已發音
                     }
@@ -3500,6 +3724,8 @@ document.addEventListener('touchend', () => {
             }
             
             const cleanedText = highlightedText.join('').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+            lastReadingFraForCancelButton = spokenFra.length ? spokenFra[spokenFra.length - 1] : getLastSelectedFra();
+            updateTouchCancelFloatingButton();
             if (!cleanedText) {
                 if (readToken === touchSelectionReadToken) setTouchSelectionReadingState(false);
                 return;
@@ -3515,6 +3741,7 @@ document.addEventListener('touchend', () => {
                 hideTouchReadButtonUntilNextSelection = true;
                 lastSelectedFraForButton = getLastSelectedFra();
                 updateTouchReadFloatingButton();
+                updateTouchCancelFloatingButton();
             }, {
                 canPlay: () => readToken === touchSelectionReadToken && isTouchSelectionReading
             });
@@ -3535,7 +3762,9 @@ document.addEventListener('touchend', () => {
             }
             stopTouchSelectionPlayback();
             setTouchSelectionReadingState(false);
+            lastReadingFraForCancelButton = null;
             lastSelectedFraForButton = null;
+            updateTouchCancelFloatingButton();
         }
 
         document.getElementById('sendButton').addEventListener('click', () => {
@@ -6260,41 +6489,19 @@ async function readMarkBlock(markId, pageNum) {
     // 提取標記區域內的文字（如果有文字層）
     let text = '';
     let cleanedText = '';
+    /** 朗讀內容是否為 PDF 文字層擷取（已用 data-transform 去疊層），送 TTS 時避免字串級誤刪 */
+    let readPdfAnchoredForTts = false;
     const markLayerRect = markLayer.getBoundingClientRect();
     
     if (textLayer) {
         const textLayerRect = textLayer.getBoundingClientRect();
-        const spans = textLayer.getElementsByTagName('my-fra');
-        
-        // 計算標記在文字層中的實際位置（考慮標記層和文字層的相對位置）
         const markInTextLayer = {
             left: mark.x + (markLayerRect.left - textLayerRect.left),
             top: mark.y + (markLayerRect.top - textLayerRect.top),
             right: mark.x + mark.width + (markLayerRect.left - textLayerRect.left),
             bottom: mark.y + mark.height + (markLayerRect.top - textLayerRect.top)
         };
-        
-        for (let span of spans) {
-            const spanRect = span.getBoundingClientRect();
-            
-            // 計算 span 在文字層中的位置
-            const spanX = spanRect.left - textLayerRect.left;
-            const spanY = spanRect.top - textLayerRect.top;
-            const spanRight = spanRect.right - textLayerRect.left;
-            const spanBottom = spanRect.bottom - textLayerRect.top;
-            
-            // 檢查 span 是否與標記區域重疊（使用更寬鬆的重疊判斷）
-            const isOverlapping = !(spanRight < markInTextLayer.left || 
-                                    spanX > markInTextLayer.right ||
-                                    spanBottom < markInTextLayer.top ||
-                                    spanY > markInTextLayer.bottom);
-            
-            if (isOverlapping) {
-                text += span.textContent;
-            }
-        }
-        
-        // 清理文字（與框選朗讀一致）
+        text = extractMarkRegionTextViaPresentationSpans(textLayer, textLayerRect, markInTextLayer, { preserveLineBreaks: false });
         cleanedText = text.trim().replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
     }
     
@@ -6314,6 +6521,7 @@ async function readMarkBlock(markId, pageNum) {
     if (cleanedText.length > 0) {
         // 如果有替換文字，使用替換文字；否則使用原始文字
         text = mark.replacementText && mark.replacementText.trim() ? mark.replacementText.trim() : cleanedText;
+        readPdfAnchoredForTts = !(mark.replacementText && mark.replacementText.trim());
     } else if (hasImageContent && base64Image) {
         // 如果有替換文字，直接使用替換文字，不需要進行圖片辨識
         if (mark.replacementText && mark.replacementText.trim()) {
@@ -6479,6 +6687,7 @@ async function readMarkBlock(markId, pageNum) {
             // 使用全局的 sendTextToTTS 函數
             const ttsFunction = window.sendTextToTTS || sendTextToTTS;
             if (typeof ttsFunction === 'function') {
+                const ttsOpts = readPdfAnchoredForTts ? { pdfAnchoredTtsText: true } : {};
                 ttsFunction(text.trim(), () => {
                     // 朗讀完成後，清除文字背景色
                     highlightedSpans.forEach(({ span, originalBg }) => {
@@ -6493,7 +6702,7 @@ async function readMarkBlock(markId, pageNum) {
                         markElement.classList.remove('active');
                     }
                     resolve();
-                });
+                }, ttsOpts);
             } else {
                 console.error('sendTextToTTS 函數未定義，請檢查函數是否已正確載入');
                 // 清除文字背景色
@@ -6541,52 +6750,16 @@ function extractTextFromMark(mark, pageNum) {
     
     const textLayerRect = textLayer.getBoundingClientRect();
     const markLayerRect = markLayer.getBoundingClientRect();
-    const spans = textLayer.getElementsByTagName('my-fra');
-    
-    // 計算標記在文字層中的實際位置
+
     const markInTextLayer = {
         left: mark.x + (markLayerRect.left - textLayerRect.left),
         top: mark.y + (markLayerRect.top - textLayerRect.top),
         right: mark.x + mark.width + (markLayerRect.left - textLayerRect.left),
         bottom: mark.y + mark.height + (markLayerRect.top - textLayerRect.top)
     };
-    
-    let text = '';
-    let lastSpanY = null;
-    let lastSpanBottom = null;
-    
-    // 遍歷所有 span，提取在標記區域內的文字
-    for (let span of spans) {
-        const spanRect = span.getBoundingClientRect();
-        
-        // 計算 span 在文字層中的位置
-        const spanX = spanRect.left - textLayerRect.left;
-        const spanY = spanRect.top - textLayerRect.top;
-        const spanRight = spanRect.right - textLayerRect.left;
-        const spanBottom = spanRect.bottom - textLayerRect.top;
-        
-        // 檢查 span 是否與標記區域重疊
-        const isOverlapping = !(spanRight < markInTextLayer.left || 
-                                spanX > markInTextLayer.right ||
-                                spanBottom < markInTextLayer.top ||
-                                spanY > markInTextLayer.bottom);
-        
-        if (isOverlapping) {
-            // 檢測是否需要換行（Y座標有明顯變化，表示換行）
-            if (lastSpanY !== null && lastSpanBottom !== null) {
-                const yGap = spanY - lastSpanBottom;
-                // 如果Y座標差距超過字體大小的50%，認為是換行
-                const fontSize = spanRect.height || 16;
-                if (yGap > fontSize * 0.5) {
-                    text += '\n';
-                }
-            }
-            text += span.textContent;
-            lastSpanY = spanY;
-            lastSpanBottom = spanBottom;
-        }
-    }
-    
+
+    let text = extractMarkRegionTextViaPresentationSpans(textLayer, textLayerRect, markInTextLayer, { preserveLineBreaks: true });
+
     // 清理文字：徹底去除前導空格，保留換行，清理多餘的空白
     // 先去除開頭的所有空格、Tab（包括全形空格）
     text = text.replace(/^[\s\t\u3000]+/, '');
@@ -6600,9 +6773,9 @@ function extractTextFromMark(mark, pageNum) {
     text = text.trim();
     // 再次確保開頭沒有空格
     text = text.replace(/^[\s\t\u3000]+/, '');
-    // 與送 TTS 一致：粗體疊層去重（逐行處理以保留換行，避免整段被壓成單行）
+    // 疊層已在 presentation span 層用 data-transform 交叉比對去重；此處僅輕量清理，避免誤刪合法重複詞
     if (text && typeof collapseAdjacentDuplicateRunsForTts === 'function') {
-        text = text.split(/\r?\n/).map((line) => collapseAdjacentDuplicateRunsForTts(line)).join('\n');
+        text = text.split(/\r?\n/).map((line) => collapseAdjacentDuplicateRunsForTts(line, { pdfAnchoredExtraction: true })).join('\n');
     }
     return text;
 }
